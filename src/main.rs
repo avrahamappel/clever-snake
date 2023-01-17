@@ -44,11 +44,15 @@ impl Board {
         Self { tiles }
     }
 
-    fn is_complete(&self) -> bool {
-        !self
-            .tiles
+    fn cherry_count(&self) -> usize {
+        self.tiles
             .iter()
-            .any(|row| row.iter().any(|t| matches!(t, Tile::Cherry)))
+            .map(|row| row.iter().filter(|t| matches!(t, Tile::Cherry)).count())
+            .sum()
+    }
+
+    fn is_complete(&self) -> bool {
+        self.cherry_count() == 0
     }
 
     fn starting_positions(&self) -> impl Iterator<Item = Position> + Clone + '_ {
@@ -67,7 +71,7 @@ impl Board {
         Self { tiles }
     }
 
-    fn find_snake_head(&self) -> Option<Position> {
+    fn get_snake_head(&self) -> Option<Position> {
         self.tiles.iter().enumerate().find_map(|(y, row)| {
             row.iter()
                 .enumerate()
@@ -81,16 +85,16 @@ impl Board {
         use Dir::*;
         use Tile::*;
 
-        if cfg!(debug_assertions) {
-            dbg!(&self);
-            eprintln!("Moving snake {dir:?}");
-        }
-
         let (sx, sy) = self
-            .find_snake_head()
+            .get_snake_head()
             .expect("Can't find snake before it's placed");
 
-        let (nx, ny) = match dir {
+        if cfg!(debug_assertions) {
+            eprintln!("Snake is currently at ({sx}, {sy}).");
+            eprintln!("Snake wants to move {dir:?}.");
+        }
+
+        let new_pos = match dir {
             Up => sy.checked_sub(1).map(|y| (sx, y)),
             Down => {
                 if sy + 1 >= self.tiles.len() {
@@ -107,22 +111,42 @@ impl Board {
                 }
             }
             Left => sx.checked_sub(1).map(|x| (x, sy)),
-        }?;
+        };
+
+        if new_pos.is_none() {
+            if cfg!(debug_assertions) {
+                eprintln!("Snake is at the wall. Snake remains at ({sx}, {sy}).");
+            }
+
+            return self.into();
+        }
+
+        let (nx, ny) = new_pos.unwrap();
+
+        if cfg!(debug_assertions) {
+            eprintln!("Snake is trying to move to ({nx}, {ny}).");
+        }
 
         match self.tiles[ny][nx] {
-            Rock => None,
+            a @ (Rock | SnakeBody) => {
+                if cfg!(debug_assertions) {
+                    eprintln!("The way is blocked by {a:?}. Snake remains at ({sx}, {sy}).");
+                }
+
+                self.into()
+            }
+
             Cherry => {
+                if cfg!(debug_assertions) {
+                    eprintln!("The way is clear. Snake proceeds.");
+                }
+
                 self.tiles[sy][sx] = SnakeBody;
                 self.tiles[ny][nx] = SnakeHead;
 
-                if let Some(b) = self.clone().move_snake(dir) {
-                    b
-                } else {
-                    self
-                }
-                .into()
+                self.move_snake(dir)
             }
-            SnakeBody => None,
+
             SnakeHead => unreachable!(),
         }
     }
@@ -130,78 +154,49 @@ impl Board {
     fn moves(&self) -> impl Iterator<Item = Self> + '_ {
         use Dir::*;
 
-        [Up, Down, Right, Left]
-            .into_iter()
-            .filter_map(|dir| self.clone().move_snake(dir))
+        [Up, Down, Right, Left].into_iter().filter_map(|dir| {
+            self.clone().move_snake(dir).map(|new_board| {
+                if cfg!(debug_assertions) {
+                    eprintln!("{} cherries left.", new_board.cherry_count());
+                }
+
+                new_board
+            })
+        })
     }
 }
 
-#[derive(Debug, Clone)]
-enum BoardParent {
-    Board(Board),
-    SnakeStart(Position),
-}
-
-fn solution(board: Board, hash: HashMap<Board, BoardParent>) -> (Position, Vec<Dir>) {
-    use BoardParent::*;
+fn solution(board: Board, history: HashMap<Board, Option<Board>>) -> (Position, Vec<Dir>) {
     use Dir::*;
 
-    for (k, v) in &hash {
-        dbg!(k.find_snake_head(),);
-
-        match v {
-            SnakeStart(p) => {
-                dbg!(p);
-            }
-            Board(b) => {
-                dbg!(b.find_snake_head());
-            }
-        }
-    }
-
-    let mut path: Vec<_> = successors(Some(Board(board)), {
-        // eprintln!("Assembling path");
-        |bp| match bp {
-            Board(b) => hash.get(b).cloned(),
-            SnakeStart(p) => Some(SnakeStart(*p)),
-        }
+    let mut path: Vec<_> = successors(Some(&board), {
+        |b| history.get(b).and_then(|bp| bp.as_ref())
     })
-    // .inspect(|x| {
-    //     dbg!(x);
-    // })
+    .filter_map(|b| b.get_snake_head())
     .collect();
-
-    dbg!(&path);
 
     path.reverse();
 
-    let pos = match path[0] {
-        SnakeStart(p) => p,
-        Board(_) => unreachable!("The first one should always be a position"),
-    };
+    let pos = path[0];
 
     let deltas = path
         .windows(2)
         .into_iter()
-        .skip(1)
         .map(|window| match window {
-            [Board(b1), Board(b2)] => match (b1.find_snake_head(), b2.find_snake_head()) {
-                (Some((x1, y1)), Some((x2, y2))) => {
-                    if x1 > x2 {
-                        Left
-                    } else if x1 < x2 {
-                        Right
-                    } else if y1 > y2 {
-                        Up
-                    } else {
-                        Down
-                    }
+            [(x1, y1), (x2, y2)] => {
+                if x1 > x2 {
+                    Left
+                } else if x1 < x2 {
+                    Right
+                } else if y1 > y2 {
+                    Up
+                } else {
+                    Down
                 }
-                _ => unreachable!("Every board in the history should have a snake head"),
-            },
-            _ => unimplemented!(
-                "These should all be slices of BoardParent::Board with a length of 2"
-            ),
+            }
+            _ => {
+                unreachable!("These should all be slices of BoardParent::Board with a length of 2")
+            }
         })
         .collect();
 
@@ -212,14 +207,19 @@ fn solve(input: &str) -> Option<(Position, Vec<Dir>)> {
     let board = Board::new(input);
 
     let solution = board.starting_positions().find_map(|p| {
-        let mut visited = HashMap::from([(board.place_snake(p), BoardParent::SnakeStart(p))]);
-        let mut queue = VecDeque::from([board.place_snake(p)]);
+        let board = board.place_snake(p);
+
+        eprintln!("Starting from {p:?}");
+
+        let mut visited = HashMap::from([(board.clone(), None)]);
+        let mut queue = VecDeque::from([board]);
 
         while let Some(b) = queue.pop_front() {
             eprint!(".");
 
             if cfg!(debug_assertions) {
-                dbg!(&b);
+                eprintln!();
+                eprintln!("{} moves tried.", visited.len());
             }
 
             if b.is_complete() {
@@ -228,14 +228,20 @@ fn solve(input: &str) -> Option<(Position, Vec<Dir>)> {
 
             for m in b.moves() {
                 if !visited.contains_key(&m) {
-                    visited.insert(m.clone(), BoardParent::Board(b.clone()));
+                    visited.insert(m.clone(), b.clone().into());
                     queue.push_back(m);
+
+                    if cfg!(debug_assertions) {
+                        eprintln!("Added one to queue.");
+                    }
                 }
             }
         }
 
         None
     });
+
+    eprintln!();
 
     solution
 }
